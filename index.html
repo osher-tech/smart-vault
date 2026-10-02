@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Vault AI</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#1e1e2e">
+  <style>
+    :root {
+      --bg: #1e1e2e; --panel: #252538; --card: #2f2f47;
+      --text: #cdd6f4; --accent: #89b4fa; --danger: #f38ba8; --border: #45475a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, sans-serif; }
+    body { background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+    
+    #login-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.85);
+      display: flex; align-items: center; justify-content: center; z-index: 100;
+    }
+    .modal {
+      background: var(--panel); padding: 30px; border-radius: 12px; width: 360px;
+      border: 1px solid var(--border); text-align: center; box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    }
+    .modal h2 { margin-bottom: 15px; color: var(--accent); }
+    .modal input { width: 100%; padding: 12px; margin: 15px 0; background: var(--card); border: 1px solid var(--border); color: #fff; border-radius: 8px; text-align: center; font-size: 16px; }
+    .btn { background: var(--accent); color: #111; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 14px; transition: 0.2s; }
+    .btn:hover { opacity: 0.9; }
+    .btn-danger { background: var(--danger); color: #fff; }
+
+    #app { display: flex; flex: 1; height: 100vh; }
+    #sidebar { width: 300px; background: var(--panel); border-left: 1px solid var(--border); display: flex; flex-direction: column; }
+    .sidebar-header { padding: 15px; display: flex; gap: 10px; border-bottom: 1px solid var(--border); }
+    #notes-list { flex: 1; overflow-y: auto; list-style: none; }
+    #notes-list li { padding: 12px 15px; border-bottom: 1px solid var(--border); cursor: pointer; transition: 0.15s; }
+    #notes-list li:hover { background: var(--card); }
+    #notes-list li.active { background: var(--card); border-right: 4px solid var(--accent); }
+    .note-date { font-size: 11px; color: #a6adc8; margin-top: 4px; }
+
+    #main-content { flex: 1; display: flex; flex-direction: column; background: var(--bg); padding: 20px; gap: 15px; }
+    .editor-header { display: flex; gap: 10px; align-items: center; }
+    #note-title { flex: 1; padding: 10px 15px; background: var(--panel); border: 1px solid var(--border); color: #fff; border-radius: 6px; font-size: 18px; font-weight: bold; }
+    #note-content { flex: 1; padding: 15px; background: var(--panel); border: 1px solid var(--border); color: #fff; border-radius: 6px; font-size: 15px; resize: none; line-height: 1.6; }
+
+    #agent-panel { background: var(--panel); padding: 15px; border-radius: 8px; border: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
+    .agent-bar { display: flex; gap: 10px; }
+    #agent-input { flex: 1; padding: 10px 15px; background: var(--card); border: 1px solid var(--border); color: #fff; border-radius: 6px; }
+    #agent-output { max-height: 150px; overflow-y: auto; background: var(--card); padding: 10px; border-radius: 6px; font-size: 13px; white-space: pre-wrap; display: none; line-height: 1.5; }
+  </style>
+</head>
+<body>
+
+  <div id="login-overlay">
+    <div class="modal">
+      <h2>Smart Vault AES</h2>
+      <p style="font-size: 13px; color: #a6adc8;">הזן סיסמת מאסטר ל-Vault:</p>
+      <input type="password" id="master-password" placeholder="הקלד סיסמה והקש Enter..." autofocus onkeydown="if(event.key==='Enter') unlockVault()">
+      <button class="btn" style="width: 100%;" onclick="unlockVault()">פתח כספת</button>
+    </div>
+  </div>
+
+  <div id="app">
+    <div id="sidebar">
+      <div class="sidebar-header">
+        <button class="btn" style="flex:1;" onclick="createNewNote()">פתק חדש +</button>
+        <button class="btn btn-danger" onclick="deleteCurrentNote()">מחק</button>
+      </div>
+      <ul id="notes-list"></ul>
+    </div>
+
+    <div id="main-content">
+      <div class="editor-header">
+        <input type="text" id="note-title" placeholder="כותרת הפתק..." oninput="updateCurrentNote()">
+        <button id="save-btn" class="btn" onclick="saveAndEncrypt()">שמור והצפן (Ctrl+S)</button>
+      </div>
+      <textarea id="note-content" placeholder="הקלד כאן... (סמן משימות עם [ ] או לעשות:)" oninput="updateCurrentNote()"></textarea>
+
+      <div id="agent-panel">
+        <div class="agent-bar">
+          <input type="text" id="agent-input" placeholder="למשל: סכם מה כתבתי השבוע | משימות מאתמול | סכם נוכחי" onkeydown="if(event.key==='Enter') runAgent()">
+          <button class="btn" onclick="runAgent()">שאל סוכן</button>
+        </div>
+        <div id="agent-output"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function bufferToBase64(bytes) {
+      let binary = '';
+      const len = bytes.byteLength;
+      const chunkSize = 8192;
+      for (let i = 0; i < len; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunkSize, len)));
+      }
+      return btoa(binary);
+    }
+
+    function base64ToBuffer(base64) {
+      const binary = atob(base64);
+      const len = binary.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    }
+
+    let passwordKey = null;
+    let notes = [];
+    let activeNoteId = null;
+    let autoSaveTimer = null;
+
+    async function deriveKey(password, salt) {
+      const enc = new TextEncoder();
+      const baseKey = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']);
+      return crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
+        baseKey,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt']
+      );
+    }
+
+    async function encryptData(dataStr, password) {
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const key = await deriveKey(password, salt);
+      const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(dataStr));
+      
+      const payload = new Uint8Array(salt.length + iv.length + cipher.byteLength);
+      payload.set(salt, 0);
+      payload.set(iv, 16);
+      payload.set(new Uint8Array(cipher), 28);
+      return bufferToBase64(payload);
+    }
+
+    async function decryptData(base64Str, password) {
+      const raw = base64ToBuffer(base64Str);
+      if (raw.length < 28) throw new Error("קובץ פגום");
+      const salt = raw.slice(0, 16);
+      const iv = raw.slice(16, 28);
+      const cipher = raw.slice(28);
+      const key = await deriveKey(password, salt);
+      const dec = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, cipher);
+      return new TextDecoder().decode(dec);
+    }
+
+    async function unlockVault() {
+      const pass = document.getElementById('master-password').value.trim();
+      if (!pass) return alert("אנא הזן סיסמה");
+      passwordKey = pass;
+
+      const encrypted = localStorage.getItem('smart_vault_data');
+      if (encrypted) {
+        try {
+          const json = await decryptData(encrypted, passwordKey);
+          notes = JSON.parse(json);
+        } catch (e) {
+          return alert("סיסמה שגויה או שהמידע פגום!");
+        }
+      }
+      document.getElementById('login-overlay').style.display = 'none';
+      renderList();
+      if (notes.length > 0) selectNote(notes[0].id);
+      else createNewNote();
+    }
+
+    async function saveAndEncrypt() {
+      if (!passwordKey) return;
+      const json = JSON.stringify(notes);
+      const enc = await encryptData(json, passwordKey);
+      localStorage.setItem('smart_vault_data', enc);
+      
+      const btn = document.getElementById('save-btn');
+      if (btn) {
+        btn.innerText = "נשמר!";
+        setTimeout(() => btn.innerText = "שמור והצפן (Ctrl+S)", 1000);
+      }
+    }
+
+    function createNewNote() {
+      const newNote = { id: Date.now().toString(), title: "פתק חדש", content: "", timestamp: new Date().toISOString() };
+      notes.unshift(newNote);
+      renderList();
+      selectNote(newNote.id);
+      saveAndEncrypt();
+    }
+
+    function selectNote(id) {
+      activeNoteId = id;
+      const n = notes.find(x => x.id === id);
+      if (!n) return;
+      document.getElementById('note-title').value = n.title;
+      document.getElementById('note-content').value = n.content;
+      renderList();
+    }
+
+    function updateCurrentNote() {
+      const n = notes.find(x => x.id === activeNoteId);
+      if (n) {
+        n.title = document.getElementById('note-title').value;
+        n.content = document.getElementById('note-content').value;
+        
+        // עדכון כותרת ברשימה בזמן אמת ללא רענון מלא
+        const activeLi = document.querySelector('#notes-list li.active strong');
+        if (activeLi) activeLi.innerText = n.title || 'ללא כותרת';
+
+        // שמירה אוטומטית מוצפנת אחרי 1.5 שניות של חוסר פעילות
+        clearTimeout(autoSaveTimer);
+        autoSaveTimer = setTimeout(saveAndEncrypt, 1500);
+      }
+    }
+
+    function deleteCurrentNote() {
+      if (!activeNoteId || !confirm("האם למחוק פתק זה?")) return;
+      notes = notes.filter(x => x.id !== activeNoteId);
+      renderList();
+      if (notes.length > 0) selectNote(notes[0].id);
+      else createNewNote();
+      saveAndEncrypt();
+    }
+
+    function renderList() {
+      const ul = document.getElementById('notes-list');
+      ul.innerHTML = '';
+      notes.forEach(n => {
+        const li = document.createElement('li');
+        if (n.id === activeNoteId) li.className = 'active';
+        const d = new Date(n.timestamp);
+        li.innerHTML = `<strong>${n.title || 'ללא כותרת'}</strong><div class="note-date">${d.toLocaleDateString('he-IL')} ${d.toLocaleTimeString('he-IL', {hour:'2-digit', minute:'2-digit'})}</div>`;
+        li.onclick = () => selectNote(n.id);
+        ul.appendChild(li);
+      });
+    }
+
+    window.addEventListener('keydown', e => {
+      if (e.ctrlKey && e.key.toLowerCase() === 's') { e.preventDefault(); saveAndEncrypt(); }
+    });
+
+    // ==================== מנוע הסוכן (Agent NLP) ====================
+    const STOP_WORDS = new Set([
+      "את", "של", "על", "זה", "עם", "לא", "כי", "אם", "או", "גם", "היה", "היו",
+      "אבל", "רק", "כל", "יותר", "מה", "איך", "כמו", "שלי", "שלו", "שלה", "הם", "הן",
+      "the", "is", "at", "which", "on", "and", "a", "an", "in", "to", "for", "with"
+    ]);
+
+    function runAgent() {
+      const q = document.getElementById('agent-input').value.trim().toLowerCase();
+      const out = document.getElementById('agent-output');
+      if (!q) return;
+
+      const now = new Date();
+      let fromDate = null, toDate = new Date();
+
+      if (q.includes("היום")) { 
+        fromDate = new Date(); fromDate.setHours(0,0,0,0); 
+      } else if (q.includes("אתמול")) { 
+        fromDate = new Date(); fromDate.setDate(fromDate.getDate() - 1); fromDate.setHours(0,0,0,0);
+        toDate = new Date(); toDate.setDate(toDate.getDate() - 1); toDate.setHours(23,59,59,999);
+      } else if (q.includes("שבוע")) { 
+        fromDate = new Date(); fromDate.setDate(fromDate.getDate() - 7); 
+      } else if (q.includes("חודש")) { 
+        fromDate = new Date(); fromDate.setDate(fromDate.getDate() - 30); 
+      }
+
+      let filtered = notes.filter(n => {
+        const t = new Date(n.timestamp);
+        return (!fromDate || t >= fromDate) && (!toDate || t <= toDate);
+      });
+
+      if (q.includes("נוכחי") || q.includes("זה")) {
+        const curr = notes.find(x => x.id === activeNoteId);
+        filtered = curr ? [curr] : [];
+      }
+
+      let res = "";
+      if (q.includes("משימ") || q.includes("todo") || q.includes("לעשות")) {
+        res = extractTasks(filtered);
+      } else if (q.includes("סכם") || q.includes("סיכום") || q.includes("תמצת")) {
+        res = smartSummarize(filtered);
+      } else {
+        res = searchNotes(q, filtered);
+      }
+
+      out.style.display = "block";
+      out.innerText = res;
+    }
+
+    function extractTasks(noteList) {
+      let tasks = [];
+      const regex = /^\s*(- \[[ ]?\]|\[[ ]?\]|todo:|לעשות:|דחוף:)\s*(.+)$/im;
+      noteList.forEach(n => {
+        n.content.split('\n').forEach(line => {
+          const match = regex.exec(line);
+          if (match) tasks.push(`• [${n.title}]: ${match[2].trim()}`);
+        });
+      });
+      return tasks.length ? "=== משימות פתוחות ===\n\n" + tasks.join("\n") : "לא נמצאו משימות פתוחות.";
+    }
+
+    function smartSummarize(noteList) {
+      let allSentences = [];
+      noteList.forEach(n => {
+        const raw = (n.title ? n.title + ". " : "") + n.content;
+        raw.split(/(?<=[.!?])\s+|\n+/).forEach(s => {
+          const clean = s.trim();
+          if (clean.length > 15) allSentences.push({ text: clean, noteTitle: n.title });
+        });
+      });
+
+      if (!allSentences.length) return "אין מספיק תוכן לסיכום ענייני.";
+
+      // חישוב שכיחויות מילים (TF)
+      const freq = {};
+      allSentences.forEach(({ text }) => {
+        const words = text.toLowerCase().match(/[\p{L}\p{Nd}]+/gu) || [];
+        words.forEach(w => {
+          if (w.length > 2 && !STOP_WORDS.has(w)) freq[w] = (freq[w] || 0) + 1;
+        });
+      });
+
+      // דירוג משפטים
+      const scored = allSentences.map((item, idx) => {
+        const words = item.text.toLowerCase().match(/[\p{L}\p{Nd}]+/gu) || [];
+        let score = 0;
+        words.forEach(w => { score += (freq[w] || 0); });
+        if (/חשוב|הוחלט|סיכום|דחוף/i.test(item.text)) score *= 1.5;
+        return { ...item, score, originalIdx: idx };
+      });
+
+      // בחירת המובילים ושמירה על הסדר המקורי
+      scored.sort((a, b) => b.score - a.score);
+      const top = scored.slice(0, 4);
+      top.sort((a, b) => a.originalIdx - b.originalIdx);
+
+      return "=== עיקרי הדברים (סיכום חכם) ===\n\n" + top.map((item, i) => `${i+1}. [${item.noteTitle}] ${item.text}`).join("\n\n");
+    }
+
+    function searchNotes(term, noteList) {
+      let found = [];
+      noteList.forEach(n => {
+        if (n.content.toLowerCase().includes(term) || n.title.toLowerCase().includes(term)) {
+          found.push(`• [${n.title}]`);
+        }
+      });
+      return found.length ? "=== תוצאות התאמה ===\n\n" + found.join("\n") : "לא נמצאו תוצאות עבור: " + term;
+    }
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js');
+    }
+  </script>
+</body>
+</html>
